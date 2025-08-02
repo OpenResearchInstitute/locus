@@ -175,7 +175,10 @@ class ProductionConferenceServer:
         failed_stations = []
         
         for callsign, info in self.stations.items():
-            if callsign != sender_callsign and info['ip'] != sender_ip:
+#-=-=-=-=-=-=This test determines what is being forwarded=-=-=-=-=-=-
+#            NEW: Accept same IP address if different callsign             
+#            if callsign != sender_callsign and info['ip'] != sender_ip:
+            if callsign != sender_callsign:
                 target_addr = (info['ip'], self.listen_port)
                 
                 try:
