@@ -24,9 +24,9 @@ except ImportError:
 class ProductionConferenceServer:
     """Production conference server for separate machine deployment with IPv6 support"""
     
-    def __init__(self, listen_port=57372, ipv6_only=False):
+    def __init__(self, listen_port=57372, station_timeout=300):
         self.listen_port = listen_port
-        self.ipv6_only = ipv6_only
+        self.station_timeout = station_timeout  # Station inactivity timeout in seconds
         self.socket = None
         self.running = False
         
@@ -39,6 +39,7 @@ class ProductionConferenceServer:
             'frames_forwarded': 0,
             'unique_stations': 0,
             'decode_errors': 0,
+            'timed_out_stations': 0,
             'start_time': time.time(),
             'ipv4_connections': 0,
             'ipv6_connections': 0
@@ -54,21 +55,20 @@ class ProductionConferenceServer:
         self.running = False
         
     def _create_socket(self):
-        """Create socket with dual-stack IPv6 support"""
+        """Create socket with dual-stack IPv6 support, fallback to IPv4"""
         try:
             # Try IPv6 dual-stack first (preferred)
-            if not self.ipv6_only:
-                try:
-                    sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    # Enable dual-stack (IPv4 + IPv6) - this is usually default on Linux
-                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-                    sock.bind(('::', self.listen_port))
-                    print("🌍 IPv6 dual-stack socket created (supports both IPv4 and IPv6)")
-                    return sock, "dual-stack"
-                except Exception as e:
-                    print(f"⚠️  IPv6 dual-stack failed: {e}")
-                    print("📡 Falling back to IPv4-only...")
+            try:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Enable dual-stack (IPv4 + IPv6) - this is usually default on Linux
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                sock.bind(('::', self.listen_port))
+                print("🌍 IPv6 dual-stack socket created (supports both IPv4 and IPv6)")
+                return sock, "dual-stack"
+            except Exception as e:
+                print(f"⚠️  IPv6 dual-stack failed: {e}")
+                print("📡 Falling back to IPv4-only...")
             
             # Fallback to IPv4-only
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -122,6 +122,7 @@ class ProductionConferenceServer:
             
             frame_count = 0
             last_stats_time = time.time()
+            last_cleanup_time = time.time()
             
             while self.running:
                 try:
@@ -139,8 +140,14 @@ class ProductionConferenceServer:
                     # Process frame
                     self._process_frame(frame_data, sender_addr)
                     
-                    # Periodic statistics (every 60 seconds)
                     current_time = time.time()
+                    
+                    # Periodic cleanup of inactive stations (every 30 seconds)
+                    if current_time - last_cleanup_time >= 30.0:
+                        self._cleanup_inactive_stations()
+                        last_cleanup_time = current_time
+                    
+                    # Periodic statistics (every 60 seconds)
                     if current_time - last_stats_time >= 60.0:
                         self._print_periodic_stats()
                         last_stats_time = current_time
@@ -258,6 +265,24 @@ class ProductionConferenceServer:
         
         return forwarded_count
     
+    def _cleanup_inactive_stations(self):
+        """Remove stations that haven't been seen for too long"""
+        current_time = time.time()
+        inactive_stations = []
+        
+        for callsign, info in self.stations.items():
+            inactive_duration = current_time - info['last_seen']
+            if inactive_duration > self.station_timeout:
+                inactive_stations.append((callsign, inactive_duration))
+        
+        # Remove inactive stations
+        for callsign, duration in inactive_stations:
+            station_info = self.stations[callsign]
+            ip_type = "IPv6" if self._is_ipv6_address(station_info['ip']) else "IPv4"
+            print(f"⏰ TIMEOUT: {callsign} at {station_info['ip']} ({ip_type}) - inactive for {duration/60:.1f} minutes")
+            del self.stations[callsign]
+            self.stats['timed_out_stations'] += 1
+    
     def _print_periodic_stats(self):
         """Print periodic statistics"""
         uptime = time.time() - self.stats['start_time']
@@ -270,6 +295,7 @@ class ProductionConferenceServer:
         print(f"📤 Frames forwarded: {self.stats['frames_forwarded']}")
         print(f"👥 Active stations: {len(self.stations)}")
         print(f"❌ Decode errors: {self.stats['decode_errors']}")
+        print(f"⏰ Timed out stations: {self.stats['timed_out_stations']}")
         print(f"🌐 IPv4 connections: {self.stats['ipv4_connections']}")
         print(f"🌐 IPv6 connections: {self.stats['ipv6_connections']}")
         
@@ -279,10 +305,12 @@ class ProductionConferenceServer:
         
         if len(self.stations) > 0:
             print(f"\n📋 Active Stations:")
+            current_time = time.time()
             for callsign, info in self.stations.items():
-                age = time.time() - info['last_seen']
+                age = current_time - info['last_seen']
                 ip_type = "IPv6" if self._is_ipv6_address(info['ip']) else "IPv4"
-                print(f"   📡 {callsign} at {info['ip']} ({ip_type}, {info['frame_count']} frames, {age:.0f}s ago)")
+                timeout_remaining = self.station_timeout - age
+                print(f"   📡 {callsign} at {info['ip']} ({ip_type}, {info['frame_count']} frames, {age:.0f}s ago, timeout in {timeout_remaining/60:.1f}m)")
         
         print("=" * 60)
         
@@ -306,6 +334,7 @@ class ProductionConferenceServer:
         print(f"📥 Total frames: {self.stats['frames_received']}")
         print(f"📤 Total forwarded: {self.stats['frames_forwarded']}")
         print(f"👥 Peak stations: {self.stats['unique_stations']}")
+        print(f"⏰ Timed out stations: {self.stats['timed_out_stations']}")
         print(f"🌐 IPv4 connections: {self.stats['ipv4_connections']}")
         print(f"🌐 IPv6 connections: {self.stats['ipv6_connections']}")
         
@@ -323,6 +352,7 @@ def create_argument_parser():
         epilog="""
 IPv6 SUPPORT:
   • Server automatically creates dual-stack socket (IPv4 + IPv6)
+  • Automatic fallback to IPv4-only if IPv6 unavailable
   • IPv4 clients connect normally: python3 interlocutor.py CALL -i <ipv4_addr>
   • IPv6 clients use IPv6 address: python3 interlocutor.py CALL -i <ipv6_addr>
   • Mixed networks with both IPv4 and IPv6 clients supported
@@ -335,7 +365,7 @@ DEPLOYMENT REQUIREMENTS:
 EXAMPLES:
   %(prog)s                    # Listen dual-stack on port 57372
   %(prog)s -p 8000           # Listen dual-stack on port 8000
-  %(prog)s --ipv4-only       # Force IPv4-only mode
+  %(prog)s -t 600            # 10-minute station timeout
   %(prog)s -v                # Enable verbose logging
         """
     )
@@ -348,9 +378,10 @@ EXAMPLES:
     )
     
     parser.add_argument(
-        '--ipv4-only',
-        action='store_true',
-        help='Force IPv4-only mode (disable dual-stack)'
+        '-t', '--timeout',
+        type=int,
+        default=300,
+        help='Station inactivity timeout in seconds (default: 300 = 5 minutes)'
     )
     
     parser.add_argument(
@@ -375,11 +406,15 @@ def main():
     print("📡 Production Opulent Voice Conference Server")
     print(f"📡 Version: IPv6 Dual-Stack Deployment")
     print(f"📡 Listen port: {args.port}")
-    print(f"📡 Mode: {'IPv4-only' if args.ipv4_only else 'Dual-stack (IPv4 + IPv6)'}")
+    print(f"📡 Station timeout: {args.timeout} seconds ({args.timeout/60:.1f} minutes)")
     
     # Validate configuration
     if not (1024 <= args.port <= 65535):
         print(f"❌ Invalid port: {args.port} (must be 1024-65535)")
+        return 1
+    
+    if args.timeout < 60:
+        print(f"❌ Invalid timeout: {args.timeout} (must be at least 60 seconds)")
         return 1
     
     # Check decoder availability
@@ -391,14 +426,10 @@ def main():
             return 1
     
     print(f"\n🚀 Starting server...")
-    if not args.ipv4_only:
-        print(f"🌐 IPv4 stations: python3 interlocutor.py CALL -i <server_ipv4>")
-        print(f"🌐 IPv6 stations: python3 interlocutor.py CALL -i <server_ipv6>")
-    else:
-        print(f"🌐 IPv4 stations: python3 interlocutor.py CALL -i <server_ip>")
+    print(f"🌐 Will try IPv6 dual-stack, fallback to IPv4 if needed")
     
     # Create and start server
-    server = ProductionConferenceServer(args.port, args.ipv4_only)
+    server = ProductionConferenceServer(args.port, args.timeout)
     return server.start()
 
 if __name__ == "__main__":
