@@ -357,12 +357,12 @@ class ProductionConferenceServer:
         
         print(f"\n🏁 Production conference server stopped")
 
-    def create_argument_parser():
-        """Create command line argument parser"""
-        parser = argparse.ArgumentParser(
-            description='Production Opulent Voice Conference Server with IPv6 Support and Station Timeout',
-            formatter_class=argparse.RawDescriptionHelpFormatter,
-            epilog="""
+def create_argument_parser():
+    """Create command line argument parser"""
+    parser = argparse.ArgumentParser(
+        description='Production Opulent Voice Conference Server with IPv6 Support and Station Timeout',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
     IPv6 SUPPORT:
       • Server automatically creates dual-stack socket (IPv4 + IPv6)
       • Automatic fallback to IPv4-only if IPv6 unavailable
@@ -386,8 +386,8 @@ class ProductionConferenceServer:
       %(prog)s -p 8000           # Listen dual-stack on port 8000
       %(prog)s -t 600            # 10-minute station timeout
       %(prog)s -v                # Enable verbose logging
-            """
-        )
+        """
+    )
     
     parser.add_argument(
         '-p', '--port',
