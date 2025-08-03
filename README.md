@@ -168,7 +168,7 @@ sudo systemctl status opulent-voice-server
 
 #### 1. Create Linode Instance
 ```
-# Recommended: Ubuntu 22.04 LTS, Shared CPU, 1GB RAM minimum
+# Recommended: Ubuntu 24.04 LTS, Shared CPU, 1GB RAM minimum
 # Region: Choose closest to your stations for lowest latency
 ```
 
@@ -180,19 +180,12 @@ ssh root@<LINODE_IP>
 # Update system
 apt update && apt upgrade -y
 
-# Install Python and dependencies
-apt install -y python3 python3-pip git ufw
-
 # Create service user
 useradd -r -s /bin/false -m -d /opt/opulent-voice opulentvoice
 ```
 
 #### 3. Install Opulent Voice
 ```
-# Create directory structure
-mkdir -p /opt/opulent-voice
-cd /opt/opulent-voice
-
 # Copy your files to the server (choose one method):
 
 # Method A: Direct file copy (if files are on your local machine)
@@ -200,6 +193,8 @@ cd /opt/opulent-voice
 
 # Method B: Clone from your repository (if you have one)
 # git clone <YOUR_REPO_URL> .
+# Note: this leaves the Python files in a subdirectory named after your repo (locus). Your files will probably need to be copied up a level.
+
 
 # Method C: Create files directly on server
 # nano production_conference_server.py
@@ -247,7 +242,7 @@ Type=simple
 User=opulentvoice
 Group=opulentvoice
 WorkingDirectory=/opt/opulent-voice
-ExecStart=/usr/bin/python3 production_conference_server.py
+ExecStart=/usr/bin/python3 production_ready_server.py
 Restart=always
 RestartSec=10
 
@@ -291,6 +286,8 @@ systemctl status opulent-voice-server
 # View recent logs
 journalctl -u opulent-voice-server --since "1 hour ago"
 
+# Note: log view shown by journalctl may not show the very latest info. Instead, the log entries may be batched up and displayed in bursts.
+
 # Restart if needed
 systemctl restart opulent-voice-server
 
@@ -307,7 +304,7 @@ systemctl stop opulent-voice-server
 nslookup conference.yourdomain.com
 
 # Stations can then connect with:
-# python3 interlocutor.py W1ABC -i conference.yourdomain.com
+# python3 interlocutor.py W1ABC -i <server-ip-address>
 ```
 
 #### 9. Linode-Specific Monitoring
