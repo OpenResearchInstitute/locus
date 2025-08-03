@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Production Conference Server (Separate Machine Only) - IPv6 Support Only
+Production Conference Server (Separate Machine Only) - With Station Timeout
 Designed to run on a dedicated machine, separate from stations
+Added: Automatic timeout of inactive stations
 Added: IPv6 dual-stack support with automatic fallback to IPv4
 """
 
@@ -22,10 +23,12 @@ except ImportError:
     print("⚠️  Using hex fallback for station IDs")
 
 class ProductionConferenceServer:
-    """Production conference server for separate machine deployment with IPv6 support"""
+    """Production conference server for separate machine deployment with station timeout and IPv6 support"""
+
     
-    def __init__(self, listen_port=57372):
+    def __init__(self, listen_port=57372, station_timeout=3600):
         self.listen_port = listen_port
+        self.station_timeout = station_timeout  # Station inactivity timeout in seconds
         self.socket = None
         self.running = False
         
@@ -38,6 +41,8 @@ class ProductionConferenceServer:
             'frames_forwarded': 0,
             'unique_stations': 0,
             'decode_errors': 0,
+
+            'timed_out_stations': 0,
             'start_time': time.time(),
             'ipv4_connections': 0,
             'ipv6_connections': 0
@@ -107,11 +112,14 @@ class ProductionConferenceServer:
             print(f"🏷️  Station decoding: {'✅ Base-40 callsigns' if PROPER_DECODER_AVAILABLE else '⚠️  Hex IDs'}")
             print(f"🌍 Mode: Production (separate machine)")
             print(f"🎯 Forward strategy: IP-based routing to port {self.listen_port}")
+            print(f"⏰ Station timeout: {self.station_timeout} seconds ({self.station_timeout/60:.1f} minutes)")
+
             if socket_type == "dual-stack":
                 print("🌐 IPv4 clients: python3 interlocutor.py CALL -i <server_ipv4>")
                 print("🌐 IPv6 clients: python3 interlocutor.py CALL -i <server_ipv6>")
             else:
                 print("🌐 IPv4 clients: python3 interlocutor.py CALL -i <server_ip>")
+
             print("=" * 80)
             print("🚀 Server ready for connections")
             print("📊 Statistics will be shown every 60 seconds")
@@ -120,6 +128,7 @@ class ProductionConferenceServer:
             
             frame_count = 0
             last_stats_time = time.time()
+            last_cleanup_time = time.time()
             
             while self.running:
                 try:
@@ -137,8 +146,14 @@ class ProductionConferenceServer:
                     # Process frame
                     self._process_frame(frame_data, sender_addr)
                     
-                    # Periodic statistics (every 60 seconds)
                     current_time = time.time()
+                    
+                    # Periodic cleanup of inactive stations (every 30 seconds)
+                    if current_time - last_cleanup_time >= 30.0:
+                        self._cleanup_inactive_stations()
+                        last_cleanup_time = current_time
+                    
+                    # Periodic statistics (every 60 seconds)
                     if current_time - last_stats_time >= 60.0:
                         self._print_periodic_stats()
                         last_stats_time = current_time
@@ -256,6 +271,23 @@ class ProductionConferenceServer:
         
         return forwarded_count
     
+    def _cleanup_inactive_stations(self):
+        """Remove stations that haven't been seen for too long"""
+        current_time = time.time()
+        inactive_stations = []
+        
+        for callsign, info in self.stations.items():
+            inactive_duration = current_time - info['last_seen']
+            if inactive_duration > self.station_timeout:
+                inactive_stations.append((callsign, inactive_duration))
+        
+        # Remove inactive stations
+        for callsign, duration in inactive_stations:
+            station_info = self.stations[callsign]
+            print(f"⏰ TIMEOUT: {callsign} at {station_info['ip']} - inactive for {duration/60:.1f} minutes")
+            del self.stations[callsign]
+            self.stats['timed_out_stations'] += 1
+    
     def _print_periodic_stats(self):
         """Print periodic statistics"""
         uptime = time.time() - self.stats['start_time']
@@ -268,8 +300,10 @@ class ProductionConferenceServer:
         print(f"📤 Frames forwarded: {self.stats['frames_forwarded']}")
         print(f"👥 Active stations: {len(self.stations)}")
         print(f"❌ Decode errors: {self.stats['decode_errors']}")
+        print(f"⏰ Timed out stations: {self.stats['timed_out_stations']}")
         print(f"🌐 IPv4 connections: {self.stats['ipv4_connections']}")
         print(f"🌐 IPv6 connections: {self.stats['ipv6_connections']}")
+
         
         if self.stats['frames_received'] > 0:
             efficiency = (self.stats['frames_forwarded'] / self.stats['frames_received']) * 100
@@ -279,8 +313,10 @@ class ProductionConferenceServer:
             print(f"\n📋 Active Stations:")
             for callsign, info in self.stations.items():
                 age = time.time() - info['last_seen']
+                timeout_remaining = self.station_timeout - age
                 ip_type = "IPv6" if self._is_ipv6_address(info['ip']) else "IPv4"
-                print(f"   📡 {callsign} at {info['ip']} ({ip_type}, {info['frame_count']} frames, {age:.0f}s ago)")
+                print(f"   📡 {callsign} at {info['ip']} ({ip_type}, {info['frame_count']} frames, {age:.0f}s ago, timeout in {timeout_remaining/60:.1f}m)")
+
         
         print("=" * 60)
         
@@ -289,6 +325,12 @@ class ProductionConferenceServer:
             print("⚠️  No active stations - waiting for connections...")
         elif self.stats['decode_errors'] > self.stats['frames_received'] * 0.1:
             print("⚠️  High decode error rate - check frame format compatibility")
+        
+        # Timeout health check
+        if self.stats['timed_out_stations'] > 0:
+            timeout_rate = self.stats['timed_out_stations'] / max(1, self.stats['unique_stations']) * 100
+            if timeout_rate > 20:
+                print(f"⚠️  High timeout rate ({timeout_rate:.1f}%) - consider increasing timeout duration")
     
     def _shutdown(self):
         """Clean shutdown with final statistics"""
@@ -304,8 +346,10 @@ class ProductionConferenceServer:
         print(f"📥 Total frames: {self.stats['frames_received']}")
         print(f"📤 Total forwarded: {self.stats['frames_forwarded']}")
         print(f"👥 Peak stations: {self.stats['unique_stations']}")
+        print(f"⏰ Timed out stations: {self.stats['timed_out_stations']}")
         print(f"🌐 IPv4 connections: {self.stats['ipv4_connections']}")
         print(f"🌐 IPv6 connections: {self.stats['ipv6_connections']}")
+
         
         if self.stats['frames_received'] > 0:
             avg_rate = self.stats['frames_received'] / uptime
@@ -313,36 +357,50 @@ class ProductionConferenceServer:
         
         print(f"\n🏁 Production conference server stopped")
 
-def create_argument_parser():
-    """Create command line argument parser"""
-    parser = argparse.ArgumentParser(
-        description='Production Opulent Voice Conference Server with IPv6 Support',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-IPv6 SUPPORT:
-  • Server automatically creates dual-stack socket (IPv4 + IPv6)
-  • Automatic fallback to IPv4-only if IPv6 unavailable
-  • IPv4 clients connect normally: python3 interlocutor.py CALL -i <ipv4_addr>
-  • IPv6 clients use IPv6 address: python3 interlocutor.py CALL -i <ipv6_addr>
-  • Mixed networks with both IPv4 and IPv6 clients supported
+    def create_argument_parser():
+        """Create command line argument parser"""
+        parser = argparse.ArgumentParser(
+            description='Production Opulent Voice Conference Server with IPv6 Support and Station Timeout',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+    IPv6 SUPPORT:
+      • Server automatically creates dual-stack socket (IPv4 + IPv6)
+      • Automatic fallback to IPv4-only if IPv6 unavailable
+      • IPv4 clients connect normally: python3 interlocutor.py CALL -i <ipv4_addr>
+      • IPv6 clients use IPv6 address: python3 interlocutor.py CALL -i <ipv6_addr>
+      • Mixed networks with both IPv4 and IPv6 clients supported
+
+    STATION TIMEOUT FEATURE:
+      • Automatically removes stations that stop transmitting
+      • Default timeout: 5 minutes (300 seconds)
+      • Cleanup check runs every 30 seconds
+      • Prevents station registry from growing indefinitely
   
-DEPLOYMENT REQUIREMENTS:
-  • Must run on a separate machine from interlocutor.py stations
-  • All stations use default port 57372 for clean routing
-  • Firewall must allow port 57372 for both IPv4 and IPv6
+    DEPLOYMENT REQUIREMENTS:
+      • Must run on a separate machine from interlocutor.py stations
+      • All stations use default port 57372 for clean routing
+      • Firewall must allow port 57372 for both IPv4 and IPv6
   
-EXAMPLES:
-  %(prog)s                    # Listen dual-stack on port 57372
-  %(prog)s -p 8000           # Listen dual-stack on port 8000
-  %(prog)s -v                # Enable verbose logging
-        """
-    )
+    EXAMPLES:
+      %(prog)s                    # Listen dual-stack on port 57372, 5-minute timeout
+      %(prog)s -p 8000           # Listen dual-stack on port 8000
+      %(prog)s -t 600            # 10-minute station timeout
+      %(prog)s -v                # Enable verbose logging
+            """
+        )
     
     parser.add_argument(
         '-p', '--port',
         type=int,
         default=57372,
         help='Port to listen on (default: 57372)'
+    )
+    
+    parser.add_argument(
+        '-t', '--timeout',
+        type=int,
+        default=3600,
+        help='Station inactivity timeout in seconds (default: 3600 = 60 minutes)'
     )
     
     parser.add_argument(
@@ -365,12 +423,17 @@ def main():
     args = parser.parse_args()
     
     print("📡 Production Opulent Voice Conference Server")
-    print(f"📡 Version: IPv6 Dual-Stack Support")
+    print(f"📡 Version: IPv6 Dual-Stack Support with Station Timeout")
     print(f"📡 Listen port: {args.port}")
+    print(f"📡 Station timeout: {args.timeout} seconds ({args.timeout/60:.1f} minutes)")
     
     # Validate configuration
     if not (1024 <= args.port <= 65535):
         print(f"❌ Invalid port: {args.port} (must be 1024-65535)")
+        return 1
+    
+    if args.timeout < 60:
+        print(f"❌ Invalid timeout: {args.timeout} (must be at least 60 seconds)")
         return 1
     
     # Check decoder availability
@@ -382,10 +445,12 @@ def main():
             return 1
     
     print(f"\n🚀 Starting server...")
+    print(f"🌍 Stations should connect with: python3 interlocutor.py CALL -i <THIS_IP>")
+    print(f"⏰ Inactive stations will timeout after {args.timeout/60:.1f} minutes")
     print(f"🌐 Will try IPv6 dual-stack, fallback to IPv4 if needed")
     
     # Create and start server
-    server = ProductionConferenceServer(args.port)
+    server = ProductionConferenceServer(args.port, args.timeout)
     return server.start()
 
 if __name__ == "__main__":
