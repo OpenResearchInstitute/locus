@@ -24,7 +24,7 @@ except ImportError:
 class ProductionConferenceServer:
     """Production conference server for separate machine deployment with station timeout"""
     
-    def __init__(self, listen_port=57372, station_timeout=300):
+    def __init__(self, listen_port=57372, station_timeout=3600):
         self.listen_port = listen_port
         self.station_timeout = station_timeout  # Station inactivity timeout in seconds
         self.socket = None
@@ -294,7 +294,7 @@ def create_argument_parser():
         epilog="""
 STATION TIMEOUT FEATURE:
   • Automatically removes stations that stop transmitting
-  • Default timeout: 5 minutes (300 seconds)
+  • Default timeout: 60 minutes (3600 seconds)
   • Cleanup check runs every 30 seconds
   • Prevents station registry from growing indefinitely
   
@@ -326,8 +326,8 @@ NETWORK SETUP:
     parser.add_argument(
         '-t', '--timeout',
         type=int,
-        default=300,
-        help='Station inactivity timeout in seconds (default: 300 = 5 minutes)'
+        default=3600,
+        help='Station inactivity timeout in seconds (default: 3600 = 60 minutes)'
     )
     
     parser.add_argument(
