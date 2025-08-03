@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Production Conference Server (Separate Machine Only)
+Production Conference Server (Separate Machine Only) - IPv6 Support Only
 Designed to run on a dedicated machine, separate from stations
+Added: IPv6 dual-stack support with automatic fallback to IPv4
 """
 
 import socket
@@ -21,7 +22,7 @@ except ImportError:
     print("⚠️  Using hex fallback for station IDs")
 
 class ProductionConferenceServer:
-    """Production conference server for separate machine deployment"""
+    """Production conference server for separate machine deployment with IPv6 support"""
     
     def __init__(self, listen_port=57372):
         self.listen_port = listen_port
@@ -37,7 +38,9 @@ class ProductionConferenceServer:
             'frames_forwarded': 0,
             'unique_stations': 0,
             'decode_errors': 0,
-            'start_time': time.time()
+            'start_time': time.time(),
+            'ipv4_connections': 0,
+            'ipv6_connections': 0
         }
         
         # Setup signal handlers for clean shutdown
@@ -49,22 +52,66 @@ class ProductionConferenceServer:
         print(f"\n🛑 Received signal {signum}, shutting down...")
         self.running = False
         
+    def _create_socket(self):
+        """Create socket with dual-stack IPv6 support, fallback to IPv4"""
+        try:
+            # Try IPv6 dual-stack first (preferred)
+            try:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Enable dual-stack (IPv4 + IPv6) - this is usually default on Linux
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                sock.bind(('::', self.listen_port))
+                print("🌍 IPv6 dual-stack socket created (supports both IPv4 and IPv6)")
+                return sock, "dual-stack"
+            except Exception as e:
+                print(f"⚠️  IPv6 dual-stack failed: {e}")
+                print("📡 Falling back to IPv4-only...")
+            
+            # Fallback to IPv4-only
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(('0.0.0.0', self.listen_port))
+            print("📡 IPv4-only socket created")
+            return sock, "ipv4-only"
+            
+        except Exception as e:
+            raise Exception(f"Failed to create socket: {e}")
+    
+    def _normalize_address(self, addr):
+        """Normalize address for IPv4-mapped IPv6 addresses"""
+        ip, port = addr[:2]  # Handle both IPv4 (ip, port) and IPv6 (ip, port, flow, scope)
+        
+        # Convert IPv4-mapped IPv6 addresses back to IPv4 format for consistency
+        if ip.startswith('::ffff:') and '.' in ip:
+            ipv4_part = ip.split('::ffff:')[1]
+            return ipv4_part, port
+        
+        return ip, port
+    
+    def _is_ipv6_address(self, ip):
+        """Check if address is IPv6"""
+        return ':' in ip and not ip.startswith('::ffff:')
+        
     def start(self):
         """Start the production conference server"""
         try:
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind(('0.0.0.0', self.listen_port))
+            self.socket, socket_type = self._create_socket()
             self.socket.settimeout(1.0)  # Allow periodic checking
             self.running = True
             
             print("=" * 80)
             print("📡 OPULENT VOICE CONFERENCE SERVER")
             print("=" * 80)
-            print(f"📡 Listening on: 0.0.0.0:{self.listen_port}")
+            print(f"📡 Listening on: {socket_type} port {self.listen_port}")
             print(f"🏷️  Station decoding: {'✅ Base-40 callsigns' if PROPER_DECODER_AVAILABLE else '⚠️  Hex IDs'}")
             print(f"🌍 Mode: Production (separate machine)")
             print(f"🎯 Forward strategy: IP-based routing to port {self.listen_port}")
+            if socket_type == "dual-stack":
+                print("🌐 IPv4 clients: python3 interlocutor.py CALL -i <server_ipv4>")
+                print("🌐 IPv6 clients: python3 interlocutor.py CALL -i <server_ipv6>")
+            else:
+                print("🌐 IPv4 clients: python3 interlocutor.py CALL -i <server_ip>")
             print("=" * 80)
             print("🚀 Server ready for connections")
             print("📊 Statistics will be shown every 60 seconds")
@@ -79,6 +126,13 @@ class ProductionConferenceServer:
                     frame_data, sender_addr = self.socket.recvfrom(4096)
                     frame_count += 1
                     self.stats['frames_received'] += 1
+                    
+                    # Track connection types
+                    normalized_ip, _ = self._normalize_address(sender_addr)
+                    if self._is_ipv6_address(normalized_ip):
+                        self.stats['ipv6_connections'] += 1
+                    else:
+                        self.stats['ipv4_connections'] += 1
                     
                     # Process frame
                     self._process_frame(frame_data, sender_addr)
@@ -103,7 +157,7 @@ class ProductionConferenceServer:
             
     def _process_frame(self, frame_data, sender_addr):
         """Process incoming frame and forward to other stations"""
-        sender_ip, sender_port = sender_addr
+        sender_ip, sender_port = self._normalize_address(sender_addr)
         
         # Extract and validate callsign
         callsign = self._extract_callsign(frame_data)
@@ -157,11 +211,14 @@ class ProductionConferenceServer:
             
             # Check for IP changes
             if station_info['ip'] != sender_ip:
-                print(f"📍 {callsign}: IP changed {station_info['ip']} → {sender_ip}")
+                ip_type = "IPv6" if self._is_ipv6_address(sender_ip) else "IPv4"
+                old_type = "IPv6" if self._is_ipv6_address(station_info['ip']) else "IPv4"
+                print(f"📍 {callsign}: {old_type} {station_info['ip']} → {ip_type} {sender_ip}")
                 station_info['ip'] = sender_ip
         else:
             # New station
-            print(f"🆕 NEW STATION: {callsign} at {sender_ip}")
+            ip_type = "IPv6" if self._is_ipv6_address(sender_ip) else "IPv4"
+            print(f"🆕 NEW STATION: {callsign} at {sender_ip} ({ip_type})")
             self.stations[callsign] = {
                 'ip': sender_ip,
                 'last_seen': current_time,
@@ -175,11 +232,14 @@ class ProductionConferenceServer:
         failed_stations = []
         
         for callsign, info in self.stations.items():
-#-=-=-=-=-=-=This test determines what is being forwarded=-=-=-=-=-=-
-#            NEW: Accept same IP address if different callsign             
-#            if callsign != sender_callsign and info['ip'] != sender_ip:
             if callsign != sender_callsign:
-                target_addr = (info['ip'], self.listen_port)
+                target_ip = info['ip']
+                
+                # Convert IPv4 addresses to IPv4-mapped IPv6 format for dual-stack socket
+                if not self._is_ipv6_address(target_ip) and '::ffff:' not in target_ip:
+                    target_ip = f"::ffff:{target_ip}"
+                
+                target_addr = (target_ip, self.listen_port)
                 
                 try:
                     self.socket.sendto(frame_data, target_addr)
@@ -208,6 +268,8 @@ class ProductionConferenceServer:
         print(f"📤 Frames forwarded: {self.stats['frames_forwarded']}")
         print(f"👥 Active stations: {len(self.stations)}")
         print(f"❌ Decode errors: {self.stats['decode_errors']}")
+        print(f"🌐 IPv4 connections: {self.stats['ipv4_connections']}")
+        print(f"🌐 IPv6 connections: {self.stats['ipv6_connections']}")
         
         if self.stats['frames_received'] > 0:
             efficiency = (self.stats['frames_forwarded'] / self.stats['frames_received']) * 100
@@ -217,7 +279,8 @@ class ProductionConferenceServer:
             print(f"\n📋 Active Stations:")
             for callsign, info in self.stations.items():
                 age = time.time() - info['last_seen']
-                print(f"   📡 {callsign} at {info['ip']} ({info['frame_count']} frames, {age:.0f}s ago)")
+                ip_type = "IPv6" if self._is_ipv6_address(info['ip']) else "IPv4"
+                print(f"   📡 {callsign} at {info['ip']} ({ip_type}, {info['frame_count']} frames, {age:.0f}s ago)")
         
         print("=" * 60)
         
@@ -241,6 +304,8 @@ class ProductionConferenceServer:
         print(f"📥 Total frames: {self.stats['frames_received']}")
         print(f"📤 Total forwarded: {self.stats['frames_forwarded']}")
         print(f"👥 Peak stations: {self.stats['unique_stations']}")
+        print(f"🌐 IPv4 connections: {self.stats['ipv4_connections']}")
+        print(f"🌐 IPv6 connections: {self.stats['ipv6_connections']}")
         
         if self.stats['frames_received'] > 0:
             avg_rate = self.stats['frames_received'] / uptime
@@ -251,23 +316,25 @@ class ProductionConferenceServer:
 def create_argument_parser():
     """Create command line argument parser"""
     parser = argparse.ArgumentParser(
-        description='Production Opulent Voice Conference Server',
+        description='Production Opulent Voice Conference Server with IPv6 Support',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+IPv6 SUPPORT:
+  • Server automatically creates dual-stack socket (IPv4 + IPv6)
+  • Automatic fallback to IPv4-only if IPv6 unavailable
+  • IPv4 clients connect normally: python3 interlocutor.py CALL -i <ipv4_addr>
+  • IPv6 clients use IPv6 address: python3 interlocutor.py CALL -i <ipv6_addr>
+  • Mixed networks with both IPv4 and IPv6 clients supported
+  
 DEPLOYMENT REQUIREMENTS:
   • Must run on a separate machine from interlocutor.py stations
-  • Stations connect using: python3 interlocutor.py CALL -i <SERVER_IP>
   • All stations use default port 57372 for clean routing
+  • Firewall must allow port 57372 for both IPv4 and IPv6
   
 EXAMPLES:
-  %(prog)s                    # Listen on default port 57372
-  %(prog)s -p 8000           # Listen on custom port 8000
+  %(prog)s                    # Listen dual-stack on port 57372
+  %(prog)s -p 8000           # Listen dual-stack on port 8000
   %(prog)s -v                # Enable verbose logging
-  
-NETWORK SETUP:
-  • Ensure port 57372 (or custom port) is open in firewall
-  • Server listens on all interfaces (0.0.0.0)
-  • Stations automatically discovered by first transmission
         """
     )
     
@@ -298,7 +365,7 @@ def main():
     args = parser.parse_args()
     
     print("📡 Production Opulent Voice Conference Server")
-    print(f"📡 Version: Separate Machine Deployment")
+    print(f"📡 Version: IPv6 Dual-Stack Support")
     print(f"📡 Listen port: {args.port}")
     
     # Validate configuration
@@ -315,7 +382,7 @@ def main():
             return 1
     
     print(f"\n🚀 Starting server...")
-    print(f"🌍 Stations should connect with: python3 interlocutor.py CALL -i <THIS_IP>")
+    print(f"🌐 Will try IPv6 dual-stack, fallback to IPv4 if needed")
     
     # Create and start server
     server = ProductionConferenceServer(args.port)
